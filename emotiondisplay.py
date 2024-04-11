@@ -1,84 +1,143 @@
 import cv2
+import mediapipe as mp
 from deepface import DeepFace
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import random
 
-model = DeepFace.build_model("Emotion")
+corner_ratio = (random.randint(1,5) / 10)
 
-emotion_labels = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
+k1 = ''
+k2 = ''
+k3 = ''
+k4 = ''
 
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+def change(keyword1,keyword2,keyword3,keyword4):
+    k1 = keyword1
+    k2 = keyword2
+    k3 = keyword3
+    k4 = keyword4
 
-cap = cv2.VideoCapture(0)
 
-# FrontEnd
-font = cv2.FONT_HERSHEY_DUPLEX
-font_scale = 4.0
-font_thickness = 3
-font_color = (255, 255, 255)
+def get_corner_positions(frame,ratio):
+  rows, cols, channels = frame.shape
+  corner_size = int(min(rows, cols) * ratio)
 
-frame_size = 400
+  top_left = {
+      "x": 0,
+      "y": 0,
+      "width": corner_size,
+      "height": corner_size
+  }
+  top_right = {
+      "x": cols - corner_size,
+      "y": 0,
+      "width": corner_size,
+      "height": corner_size
+  }
+  bottom_left = {
+      "x": 0,
+      "y": rows - corner_size,
+      "width": corner_size,
+      "height": corner_size
+  }
+  bottom_right = {
+      "x": cols - corner_size,
+      "y": rows - corner_size,
+      "width": corner_size,
+      "height": corner_size
+  }
+  return top_left, top_right, bottom_left, bottom_right
 
-def resize_to_square(image, size):
-    h, w = image.shape[:2]
-    if h > w:
-        top = 0
-        bottom = 0
-        left = (h - w) // 2
-        right = (h - w) // 2
-    else:
-        top = (w - h) // 2
-        bottom = (w - h) // 2
-        left = 0
-        right = 0
-    square_image = cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-    square_image = cv2.resize(square_image, (size, size))
-    return square_image
+def place_image_on_corner(frame, image_path, corner_position):
+  corner_x = corner_position["x"]
+  corner_y = corner_position["y"]
+  corner_width = corner_position["width"]
+  corner_height = corner_position["height"]
 
-def get_emotion_detection_result():
+  corner_image = Image.open(image_path)
+
+  corner_image = corner_image.resize((corner_width, corner_height))
+
+  if corner_image.mode != 'RGB':
+      corner_image = corner_image.convert('RGB')
+  corner_image_bgr = np.array(corner_image)[:, :, ::-1]
+
+  mask = corner_image.convert('L').point(lambda p: 255 if p > 128 else 0)
+
+  mask_np = np.array(mask)
+
+  frame_roi = frame[corner_y:corner_y+corner_height, corner_x:corner_x+corner_width]
+
+  frame_roi_bgr = frame_roi[:, :, ::-1]
+  result_bgr = np.where(mask_np[..., None] == 0, frame_roi_bgr, corner_image_bgr)
+
+  frame[corner_y:corner_y+corner_height, corner_x:corner_x+corner_width] = result_bgr
+
+  return frame
+
+def detect_emotion(face_image):
+    try:
+        result = DeepFace.analyze(face_image, actions=['emotion'],enforce_detection=False)
+        emotion = result[0]['dominant_emotion']
+        return emotion
+    except Exception as e:
+        print("Error:", str(e))
+        return None
+
+def main():
+    mp_face_detection = mp.solutions.face_detection
+    face_detection = mp_face_detection.FaceDetection()
+    cap = cv2.VideoCapture(0)
+
+    emotion = None
     while True:
         ret, frame = cap.read()
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-       
+        if not ret:
+            break
+        corner_image_paths = [
+            "filters/angry.png",
+            "filters/fear.png",
+            "filters/angry.png",
+            "filters/angry.png"
+        ]
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_detection.process(frame_rgb)
+        if results.detections:
+            for detection in results.detections:
+                bboxC = detection.location_data.relative_bounding_box
+                ih, iw, _ = frame.shape
+                bbox = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
+                       int(bboxC.width * iw), int(bboxC.height * ih)
+                face_image = frame[bbox[1]:bbox[1]+bbox[3], bbox[0]:bbox[0]+bbox[2]]
+                emotion = detect_emotion(face_image)
+                if emotion:
+                    filter_path = f'filters/{emotion}.png'
+                    overlay_image = cv2.imread(filter_path, -1)
+                    cv2.putText(frame, emotion, (bbox[0], bbox[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    overlay_resized = cv2.resize(overlay_image, (bbox[2], bbox[3]))
+                    overlay_x, overlay_y = bbox[0], bbox[1]
+                    overlay_alpha_s = overlay_resized[:, :, 3] / 255.0
+                    overlay_alpha_l = 1.0 - overlay_alpha_s
+                    for c in range(0, 3):
+                        frame[overlay_y:overlay_y+bbox[3], overlay_x:overlay_x+bbox[2], c] = \
+                            (overlay_alpha_s * overlay_resized[:, :, c] +
+                            overlay_alpha_l * frame[overlay_y:overlay_y+bbox[3], overlay_x:overlay_x+bbox[2], c])                
+        corner_positions = get_corner_positions(frame,corner_ratio)
 
-        for (x, y, w, h) in faces:
-            face_roi = gray_frame[y:y + h, x:x + w]
-            resized_face = cv2.resize(face_roi, (48, 48), interpolation=cv2.INTER_AREA)
-            normalized_face = resized_face / 255.0
-            reshaped_face = normalized_face.reshape(1, 48, 48, 1)
+        for i, corner_path in enumerate(corner_image_paths):
+            frame = place_image_on_corner(frame.copy(), corner_path, corner_positions[i])
 
-            preds = model.predict(reshaped_face)[0]
-            emotion_idx = preds.argmax()
-            emotion = emotion_labels[emotion_idx]
+        # Display the processed frame
+        # cv2.imshow('Video Feed', frame)
 
-            overlay = frame.copy()
-            opacity = 0.9  # Reduced opacity for the text box
+        # Return emotion and frame for each iteration
+        print(frame)
+        return emotion, frame
 
-            # Create a transparent box for text
-            cv2.rectangle(overlay, (0, frame_size -- 175), (600, frame_size -- 600), (0, 0, 0), -1)
-
-            cv2.addWeighted(overlay, opacity, frame, 1 - opacity, 0, frame)
-
-            cv2.putText(frame, emotion, (10, frame_size - -300), font, font_scale, font_color, font_thickness)
-
-
-# Apply emotion-based filter
-            filter_path = f'filters/{emotion}.png'
-            filter_img = cv2.imread(filter_path, -1)
-
-            if filter_img is not None:
-                filter_img = resize_to_square(filter_img, w)
-                mask = filter_img[:, :, 3] / 255.0
-
-                for c in range(3):
-                    frame[y:y + h, x:x + w, c] = frame[y:y + h, x:x + w, c] * (1 - mask) + filter_img[:, :, c] * mask
-
-        frame = resize_to_square(frame, frame_size)
-
-        return frame
-
-        # 'q' to exit
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+    # Release the video capture and close all windows
     cap.release()
     cv2.destroyAllWindows()
